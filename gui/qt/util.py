@@ -1,4 +1,4 @@
-from electrum.i18n import _
+from electrum_ltc.i18n import _
 from PyQt4.QtGui import *
 from PyQt4.QtCore import *
 import os.path
@@ -57,7 +57,7 @@ def ok_cancel_buttons(dialog, ok_label=_("OK") ):
     b.setDefault(True)
     return hbox
 
-def text_dialog(parent, title, label, ok_label):
+def text_dialog(parent, title, label, ok_label, default=None):
     dialog = QDialog(parent)
     dialog.setMinimumWidth(500)
     dialog.setWindowTitle(title)
@@ -66,6 +66,8 @@ def text_dialog(parent, title, label, ok_label):
     dialog.setLayout(l)
     l.addWidget(QLabel(label))
     txt = QTextEdit()
+    if default:
+        txt.setText(default)
     l.addWidget(txt)
     l.addLayout(ok_cancel_buttons(dialog, ok_label))
     if dialog.exec_():

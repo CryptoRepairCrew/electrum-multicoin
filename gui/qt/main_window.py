@@ -17,8 +17,8 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import sys, time, datetime, re, threading
-from electrum.i18n import _, set_language
-from electrum.util import print_error, print_msg
+from electrum_ltc.i18n import _, set_language
+from electrum_ltc.util import print_error, print_msg
 import os.path, json, ast, traceback
 import webbrowser
 import shutil
@@ -30,19 +30,19 @@ from PyQt4.QtGui import *
 from PyQt4.QtCore import *
 import PyQt4.QtCore as QtCore
 
-from electrum.bitcoin import MIN_RELAY_TX_FEE, is_valid
-from electrum.plugins import run_hook
+from electrum_ltc.bitcoin import MIN_RELAY_TX_FEE, is_valid
+from electrum_ltc.plugins import run_hook
 
 import icons_rc
 
-from electrum.wallet import format_satoshis
-from electrum import Transaction
-from electrum import mnemonic
-from electrum import util, bitcoin, commands, Interface, Wallet
-from electrum import SimpleConfig, Wallet, WalletStorage
+from electrum_ltc.wallet import format_satoshis
+from electrum_ltc import Transaction
+from electrum_ltc import mnemonic
+from electrum_ltc import util, bitcoin, commands, Interface, Wallet
+from electrum_ltc import SimpleConfig, Wallet, WalletStorage
 
 
-from electrum import bmp, pyqrnative
+from electrum_ltc import bmp, pyqrnative
 
 from amountedit import AmountEdit
 from network_dialog import NetworkDialog
@@ -63,7 +63,7 @@ elif platform.system() == 'Darwin':
 else:
     MONOSPACE_FONT = 'monospace'
 
-from electrum import ELECTRUM_VERSION
+from electrum_ltc import ELECTRUM_VERSION
 import re
 
 from util import *
@@ -113,6 +113,7 @@ class ElectrumWindow(QMainWindow):
         if reason == QSystemTrayIcon.DoubleClick:
             if self.isMinimized() or self.isHidden():
                 self.show()
+                self.raise_()
             else:
                 self.hide()
 
@@ -163,7 +164,7 @@ class ElectrumWindow(QMainWindow):
         g = self.config.get("winpos-qt",[100, 100, 840, 400])
         self.setGeometry(g[0], g[1], g[2], g[3])
 
-        self.setWindowIcon(QIcon(":icons/electrum.png"))
+        self.setWindowIcon(QIcon(":icons/electrum-ltc.png"))
         self.init_menubar()
 
         QShortcut(QKeySequence("Ctrl+W"), self, self.close)
@@ -178,6 +179,8 @@ class ElectrumWindow(QMainWindow):
         self.connect(self, QtCore.SIGNAL('update_status'), self.update_status)
         self.connect(self, QtCore.SIGNAL('banner_signal'), lambda: self.console.showMessage(self.network.banner) )
         self.connect(self, QtCore.SIGNAL('transaction_signal'), lambda: self.notify_transactions() )
+        self.connect(self, QtCore.SIGNAL('send_tx2'), self.send_tx2)
+        self.connect(self, QtCore.SIGNAL('send_tx3'), self.send_tx3)
 
         self.history_list.setFocus(True)
 
@@ -200,11 +203,13 @@ class ElectrumWindow(QMainWindow):
         self.config.set_key('lite_mode', False, True)
         self.mini.hide()
         self.show()
+        self.raise_()
 
     def go_lite(self):
         self.config.set_key('lite_mode', True, True)
         self.hide()
         self.mini.show()
+        self.mini.raise_()
 
 
     def init_lite(self):
@@ -217,6 +222,7 @@ class ElectrumWindow(QMainWindow):
                 sys.exit(0)
             self.mini = None
             self.show()
+            self.raise_()
             return
 
         actuator = lite_window.MiniActuator(self)
@@ -251,15 +257,17 @@ class ElectrumWindow(QMainWindow):
 
 
     def load_wallet(self, wallet):
-        import electrum
+        import electrum_ltc as electrum
         self.wallet = wallet
         self.accounts_expanded = self.wallet.storage.get('accounts_expanded',{})
         self.current_account = self.wallet.storage.get("current_account", None)
 
-        title = 'Electrum ' + self.wallet.electrum_version + '  -  ' + self.wallet.storage.path
+        title = 'Electrum-LTC ' + self.wallet.electrum_version + '  -  ' + self.wallet.storage.path
         if self.wallet.is_watching_only(): title += ' [%s]' % (_('watching only'))
         self.setWindowTitle( title )
         self.update_wallet()
+        self.config.set_key('default_wallet_path', self.wallet.storage.path, True)
+
         # Once GUI has been initialized check if we want to announce something since the callback has been called before the GUI was initialized
         self.notify_transactions()
         self.update_account_selector()
@@ -884,17 +892,15 @@ class ElectrumWindow(QMainWindow):
         # call hook to see if plugin needs gui interaction
         run_hook('send_tx', tx)
 
+        # sign the tx
         def sign_thread():
             time.sleep(0.1)
             keypairs = {}
             self.wallet.add_keypairs_from_wallet(tx, keypairs, password)
             self.wallet.sign_transaction(tx, keypairs, password)
-            self.signed_tx = tx
+            self.signed_tx_data = (tx, fee, label)
             self.emit(SIGNAL('send_tx2'))
-
-        # sign the tx
-        dialog = self.waiting_dialog('Signing..')
-        self.connect(self, QtCore.SIGNAL('send_tx2'), lambda: self.send_tx2(self.signed_tx, fee, label, dialog, password))
+        self.tx_wait_dialog = self.waiting_dialog('Signing..')
         threading.Thread(target=sign_thread).start()
 
         # add recipient to addressbook
@@ -902,8 +908,9 @@ class ElectrumWindow(QMainWindow):
             self.wallet.addressbook.append(to_address)
 
 
-    def send_tx2(self, tx, fee, label, dialog, password):
-        dialog.accept()
+    def send_tx2(self):
+        tx, fee, label = self.signed_tx_data
+        self.tx_wait_dialog.accept()
         
         if tx.error:
             self.show_message(tx.error)
@@ -916,23 +923,29 @@ class ElectrumWindow(QMainWindow):
         if label:
             self.wallet.set_label(tx.hash(), label)
 
-        if tx.is_complete:
-
-            d = self.waiting_dialog('Broadcasting...')
-            h = self.wallet.send_tx(tx)
-            self.wallet.tx_event.wait()
-            d.accept()
-            
-            status, msg = self.wallet.receive_tx( h, tx )
-            if status:
-                QMessageBox.information(self, '', _('Payment sent.')+'\n'+msg, _('OK'))
-                self.do_clear()
-                self.update_contacts_tab()
-            else:
-                QMessageBox.warning(self, _('Error'), msg, _('OK'))
-        else:
-
+        if not tx.is_complete:
             self.show_transaction(tx)
+            return
+
+        # broadcast the tx
+        def broadcast_thread():
+            self.tx_broadcast_result =  self.wallet.sendtx(tx)
+            self.emit(SIGNAL('send_tx3'))
+        self.tx_broadcast_dialog = self.waiting_dialog('Broadcasting..')
+        threading.Thread(target=broadcast_thread).start()
+
+
+    def send_tx3(self):
+        self.tx_broadcast_dialog.accept()
+        status, msg = self.tx_broadcast_result
+        if status:
+            QMessageBox.information(self, '', _('Payment sent.') + '\n' + msg, _('OK'))
+            self.do_clear()
+            self.update_contacts_tab()
+        else:
+            QMessageBox.warning(self, _('Error'), msg, _('OK'))
+
+
 
 
 
@@ -1141,6 +1154,7 @@ class ElectrumWindow(QMainWindow):
             menu.addAction(_("Copy to clipboard"), lambda: self.app.clipboard().setText(addr))
             menu.addAction(_("QR code"), lambda: self.show_qrcode("litecoin:" + addr, _("Address")) )
             menu.addAction(_("Edit label"), lambda: self.edit_label(True))
+            menu.addAction(_("Public keys"), lambda: self.show_public_keys(addr))
             if self.wallet.seed:
                 menu.addAction(_("Private key"), lambda: self.show_private_key(addr))
                 menu.addAction(_("Sign/verify message"), lambda: self.sign_verify_message(addr))
@@ -1667,6 +1681,30 @@ class ElectrumWindow(QMainWindow):
         apply( func, args)
 
 
+    def show_public_keys(self, address):
+        if not address: return
+        try:
+            pubkey_list = self.wallet.get_public_keys(address)
+        except Exception as e:
+            traceback.print_exc(file=sys.stdout)
+            self.show_message(str(e))
+            return
+
+        d = QDialog(self)
+        d.setMinimumSize(600, 200)
+        d.setModal(1)
+        vbox = QVBoxLayout()
+        vbox.addWidget( QLabel(_("Address") + ': ' + address))
+        vbox.addWidget( QLabel(_("Public key") + ':'))
+        keys = QTextEdit()
+        keys.setReadOnly(True)
+        keys.setText('\n'.join(pubkey_list))
+        vbox.addWidget(keys)
+        #vbox.addWidget( QRCodeWidget('\n'.join(pk_list)) )
+        vbox.addLayout(close_button(d))
+        d.setLayout(vbox)
+        d.exec_()
+
     @protected
     def show_private_key(self, address, password):
         if not address: return
@@ -1909,7 +1947,7 @@ class ElectrumWindow(QMainWindow):
             self.show_transaction(tx)
 
     def do_process_from_txid(self):
-        from electrum import transaction
+        from electrum_ltc import transaction
         txid, ok = QInputDialog.getText(self, _('Lookup transaction'), _('Transaction ID') + ':')
         if ok and txid:
             r = self.network.synchronous_get([ ('blockchain.transaction.get',[str(txid)]) ])[0]
@@ -2090,7 +2128,7 @@ class ElectrumWindow(QMainWindow):
         lang_label=QLabel(_('Language') + ':')
         grid.addWidget(lang_label, 1, 0)
         lang_combo = QComboBox()
-        from electrum.i18n import languages
+        from electrum_ltc.i18n import languages
         lang_combo.addItems(languages.values())
         try:
             index = languages.keys().index(self.config.get("language",''))
@@ -2109,7 +2147,7 @@ class ElectrumWindow(QMainWindow):
         fee_e.setText(self.format_amount(self.wallet.fee).strip())
         grid.addWidget(fee_e, 2, 1)
         msg = _('Fee per kilobyte of transaction.') + ' ' \
-            + _('Recommended value') + ': ' + self.format_amount(200000)
+            + _('Recommended value') + ': ' + self.format_amount(100000)
         grid.addWidget(HelpButton(msg), 2, 2)
         if not self.config.is_modifiable('fee_per_kb'):
             for w in [fee_e, fee_label]: w.setEnabled(False)
@@ -2204,7 +2242,7 @@ class ElectrumWindow(QMainWindow):
 
 
     def plugins_dialog(self):
-        from electrum.plugins import plugins
+        from electrum_ltc.plugins import plugins
 
         d = QDialog(self)
         d.setWindowTitle(_('Electrum Plugins'))

@@ -2,8 +2,8 @@ from PyQt4.QtGui import *
 from PyQt4.QtCore import *
 import PyQt4.QtCore as QtCore
 
-from electrum.i18n import _
-from electrum import Wallet
+from electrum_ltc.i18n import _
+from electrum_ltc import Wallet
 
 from seed_dialog import SeedDialog
 from network_dialog import NetworkDialog
@@ -132,6 +132,10 @@ class InstallWizard(QDialog):
 
         if not seed:
             QMessageBox.warning(None, _('Error'), _('No seed'), _('OK'))
+            return
+
+        if not Wallet.is_seed(seed):
+            QMessageBox.warning(None, _('Error'), _('Invalid seed'), _('OK'))
             return
 
         return seed
@@ -272,7 +276,7 @@ class InstallWizard(QDialog):
 
         elif action == 'restore':
             seed = self.seed_dialog()
-            if not seed:
+            if not Wallet.is_seed(seed):
                 return
             wallet = Wallet.from_seed(seed, self.storage)
             ok, old_password, password = self.password_dialog(wallet)

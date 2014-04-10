@@ -103,7 +103,7 @@ class WalletStorage:
         new_path = os.path.join(config.path, "wallets", "default_wallet")
 
         # default path in pre 1.9 versions
-        old_path = os.path.join(config.path, "electrum.dat")
+        old_path = os.path.join(config.path, "electrum-ltc.dat")
         if os.path.exists(old_path) and not os.path.exists(new_path):
             os.rename(old_path, new_path)
 
@@ -177,7 +177,7 @@ class NewWallet:
         self.imported_keys         = storage.get('imported_keys',{})
         self.history               = storage.get('addr_history',{})        # address -> list(txid, height)
 
-        self.fee                   = int(storage.get('fee_per_kb',200000))
+        self.fee                   = int(storage.get('fee_per_kb',100000))
 
         self.master_public_keys = storage.get('master_public_keys',{})
         self.master_private_keys = storage.get('master_private_keys', {})
@@ -288,7 +288,7 @@ class NewWallet:
             # we keep only 13 words, that's approximately 139 bits of entropy
             words = mnemonic.mn_encode(s)[0:13] 
             seed = ' '.join(words)
-            if is_seed(seed):
+            if is_new_seed(seed):
                 break  # this will remove 8 bits of entropy
             nonce += 1
 
@@ -449,10 +449,14 @@ class NewWallet:
             if k == 0:
                 v['mpk'] = self.storage.get('master_public_key')
                 self.accounts[k] = OldAccount(v)
-            elif '&' in k:
+            elif v.get('xpub3'):
+                self.accounts[k] = BIP32_Account_2of3(v)
+            elif v.get('xpub2'):
                 self.accounts[k] = BIP32_Account_2of2(v)
-            else:
+            elif v.get('xpub'):
                 self.accounts[k] = BIP32_Account(v)
+            else:
+                raise
 
         self.pending_accounts = self.storage.get('pending_accounts',{})
 
@@ -566,14 +570,6 @@ class NewWallet:
         
 
 
-    def get_keyID(self, account, sequence):
-        rs = self.rebase_sequence(account, sequence)
-        dd = []
-        for root, public_sequence in rs:
-            xpub = self.master_public_keys[root]
-            s = '/' + '/'.join( map(lambda x:str(x), public_sequence) )
-            dd.append( 'bip32(%s,%s)'%(xpub, s) )
-        return '&'.join(dd)
 
 
     def get_seed(self, password):
@@ -592,22 +588,29 @@ class NewWallet:
 
         # first check the provided password
         seed = self.get_seed(password)
-        
+
         out = []
         if address in self.imported_keys.keys():
             out.append( pw_decode( self.imported_keys[address], password ) )
         else:
             account_id, sequence = self.get_address_index(address)
-            #rs = self.rebase_sequence( account, sequence)
-            rs = [(account_id, sequence)]
-            for root, public_sequence in rs:
+            account = self.accounts[account_id]
+            xpubs = account.get_master_pubkeys()
+            roots = [k for k, v in self.master_public_keys.iteritems() if v in xpubs]
+            for root in roots:
                 xpriv = self.get_master_private_key(root, password)
-                if not xpriv: continue
+                if not xpriv:
+                    continue
                 _, _, _, c, k = deserialize_xkey(xpriv)
-                pk = bip32_private_key( public_sequence, k, c )
+                pk = bip32_private_key( sequence, k, c )
                 out.append(pk)
                     
         return out
+
+
+    def get_public_keys(self, address):
+        account_id, sequence = self.get_address_index(address)
+        return self.accounts[account_id].get_pubkeys(sequence)
 
 
     def add_keypairs_from_wallet(self, tx, keypairs, password):
@@ -632,12 +635,11 @@ class NewWallet:
             if keyid:
                 roots = []
                 for s in keyid.split('&'):
-                    m = re.match("bip32\(([0-9a-f]+),([0-9a-f]+),(/\d+/\d+/\d+)", s)
+                    m = re.match("bip32\((.*),(/\d+/\d+)\)", s)
                     if not m: continue
-                    c = m.group(1)
-                    K = m.group(2)
-                    sequence = m.group(3)
-                    root = self.find_root_by_master_key(c,K)
+                    xpub = m.group(1)
+                    sequence = m.group(2)
+                    root = self.find_root_by_master_key(xpub)
                     if not root: continue
                     sequence = map(lambda x:int(x), sequence.strip('/').split('/'))
                     root = root + '%d'%sequence[0]
@@ -1232,13 +1234,14 @@ class NewWallet:
             address = txin['address']
             if address in self.imported_keys.keys():
                 continue
-            account, sequence = self.get_address_index(address)
-            txin['KeyID'] = self.get_keyID(account, sequence)
-            redeemScript = self.accounts[account].redeem_script(sequence)
+            account_id, sequence = self.get_address_index(address)
+            account = self.accounts[account_id]
+            txin['KeyID'] = account.get_keyID(sequence)
+            redeemScript = account.redeem_script(sequence)
             if redeemScript: 
                 txin['redeemScript'] = redeemScript
             else:
-                txin['redeemPubkey'] = self.accounts[account].get_pubkey(*sequence)
+                txin['redeemPubkey'] = account.get_pubkey(*sequence)
 
 
     def sign_transaction(self, tx, keypairs, password):
@@ -1742,11 +1745,6 @@ class OldWallet(NewWallet):
             out.append(pk)
         return out
 
-    def get_keyID(self, account, sequence):
-        a, b = sequence
-        mpk = self.storage.get('master_public_key')
-        return 'old(%s,%d,%d)'%(mpk,a,b)
-
     def check_pending_accounts(self):
         pass
 
@@ -1783,35 +1781,22 @@ class Wallet(object):
 
 
     @classmethod
-    def from_seed(self, seed, storage):
-        import mnemonic
+    def is_seed(self, seed):
         if not seed:
-            return 
+            return False
+        elif is_old_seed(seed):
+            return OldWallet
+        elif is_new_seed(seed):
+            return NewWallet
+        else: 
+            return False
 
-        words = seed.strip().split()
-        try:
-            mnemonic.mn_decode(words)
-            uses_electrum_words = True
-        except Exception:
-            uses_electrum_words = False
-
-        try:
-            seed.decode('hex')
-            is_hex = True
-        except Exception:
-            is_hex = False
-         
-        if is_hex or (uses_electrum_words and len(words) != 13):
-            #print "old style wallet", len(words), words
-            w = OldWallet(storage)
-            w.init_seed(seed) #hex
-        else:
-            #assert is_seed(seed)
-            w = NewWallet(storage)
-            w.init_seed(seed)
-
+    @classmethod
+    def from_seed(self, seed, storage):
+        klass = self.is_seed(seed)
+        w = klass(storage)
+        w.init_seed(seed)
         return w
-
 
     @classmethod
     def from_mpk(self, mpk, storage):

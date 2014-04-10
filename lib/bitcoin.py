@@ -71,7 +71,25 @@ def mnemonic_to_seed(mnemonic, passphrase):
     return PBKDF2(mnemonic, 'mnemonic' + passphrase, iterations = PBKDF2_ROUNDS, macmodule = hmac, digestmodule = hashlib.sha512).read(64)
 
 from version import SEED_PREFIX
-is_seed = lambda x: hmac_sha_512("Seed version", x).encode('hex')[0:2].startswith(SEED_PREFIX)
+is_new_seed = lambda x: hmac_sha_512("Seed version", x).encode('hex')[0:2].startswith(SEED_PREFIX)
+
+def is_old_seed(seed):
+    import mnemonic
+    words = seed.strip().split()
+    try:
+        mnemonic.mn_decode(words)
+        uses_electrum_words = True
+    except Exception:
+        uses_electrum_words = False
+
+    try:
+        seed.decode('hex')
+        is_hex = True
+    except Exception:
+        is_hex = False
+         
+    return is_hex or (uses_electrum_words and len(words) == 12)
+
 
 # pywallet openssl private key implementation
 
@@ -540,18 +558,17 @@ def get_pubkeys_from_secret(secret):
 # However, if n is positive, the resulting private key's corresponding
 #  public key can be determined without the master private key.
 def CKD_priv(k, c, n):
+    is_prime = n & BIP32_PRIME
+    return _CKD_priv(k, c, rev_hex(int_to_hex(n,4)).decode('hex'), is_prime)
+
+def _CKD_priv(k, c, s, is_prime):
     import hmac
     from ecdsa.util import string_to_number, number_to_string
     order = generator_secp256k1.order()
     keypair = EC_KEY(k)
-    K = GetPubKey(keypair.pubkey,True)
-
-    if n & BIP32_PRIME: # We want to make a "secret" address that can't be determined from K
-        data = chr(0) + k + rev_hex(int_to_hex(n,4)).decode('hex')
-        I = hmac.new(c, data, hashlib.sha512).digest()
-    else: # We want a "non-secret" address that can be determined from K
-        I = hmac.new(c, K + rev_hex(int_to_hex(n,4)).decode('hex'), hashlib.sha512).digest()
-        
+    cK = GetPubKey(keypair.pubkey,True)
+    data = chr(0) + k + s if is_prime else cK + s
+    I = hmac.new(c, data, hashlib.sha512).digest()
     k_n = number_to_string( (string_to_number(I[0:32]) + string_to_number(k)) % order , order )
     c_n = I[32:]
     return k_n, c_n
@@ -563,17 +580,20 @@ def CKD_priv(k, c, n):
 # This function allows us to find the nth public key, as long as n is 
 #  non-negative. If n is negative, we need the master private key to find it.
 def CKD_pub(cK, c, n):
+    if n & BIP32_PRIME: raise
+    return _CKD_pub(cK, c, rev_hex(int_to_hex(n,4)).decode('hex'))
+
+# helper function, callable with arbitrary string
+def _CKD_pub(cK, c, s):
     import hmac
     from ecdsa.util import string_to_number, number_to_string
     order = generator_secp256k1.order()
-    if n & BIP32_PRIME: raise
-    I = hmac.new(c, cK + rev_hex(int_to_hex(n,4)).decode('hex'), hashlib.sha512).digest()
+    I = hmac.new(c, cK + s, hashlib.sha512).digest()
     curve = SECP256k1
     pubkey_point = string_to_number(I[0:32])*curve.generator + ser_to_point(cK)
     public_key = ecdsa.VerifyingKey.from_public_point( pubkey_point, curve = SECP256k1 )
     c_n = I[32:]
     cK_n = GetPubKey(public_key.pubkey,True)
-
     return cK_n, c_n
 
 

@@ -18,9 +18,14 @@
 
 
 import threading, time, Queue, os, sys, shutil
-from util import user_dir, appdata_dir, print_error
+from util import user_dir, appdata_dir, print_error, print_msg
 from bitcoin import *
-from ltc_scrypt import getPoWHash
+
+try:
+    from ltc_scrypt import getPoWHash
+except ImportError:
+    print_msg("Warning: ltc_scrypt not available, using fallback")
+    from scrypt import scrypt_1024_1_1_80 as getPoWHash
 
 
 class Blockchain(threading.Thread):
@@ -33,7 +38,7 @@ class Blockchain(threading.Thread):
         self.lock = threading.Lock()
         self.local_height = 0
         self.running = False
-        self.headers_url = 'http://electrum-ltc.bysh.me/blockchain_headers'
+        self.headers_url = 'http://headers.electrum-ltc.org/blockchain_headers'
         self.set_local_height()
         self.queue = Queue.Queue()
 
@@ -247,8 +252,8 @@ class Blockchain(threading.Thread):
 
     def get_target(self, index, chain=[]):
 
-        max_target = 0x00000FFFF0000000000000000000000000000000000000000000000000000000
-        if index == 0: return 0x1e0ffff0, max_target
+        max_target = 0x00000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        if index == 0: return 0x1e0ffff0, 0x00000FFFF0000000000000000000000000000000000000000000000000000000
 
         # Litecoin: go back the full period unless it's the first retarget
         if index == 1:
